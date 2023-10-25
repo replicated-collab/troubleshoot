@@ -1,0 +1,383 @@
+---
+on:
+  issue_comment:
+    types: [created]
+
+name: Shortcut & GitHub integration for Enhancements
+jobs:
+  create_shortcut_from_issue_comment:
+    name: Create matching SC issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Repo Membership
+        uses: actions/github-script@v6
+        if: >
+          (
+            contains(github.event.comment.body, '/clubhouse') ||
+            contains(github.event.comment.body, '/shortcut')
+          ) &&  ! (
+            contains(join(github.event.issue.labels.*.name, ' '), 'ch/') ||
+            contains(join(github.event.issue.labels.*.name, ' '), 'sc::')
+          ) && ! contains(join(github.event.issue.labels.*.name, ' '), 'kind::inbound-escalation')
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            try {
+                const membership = await github.rest.orgs.checkPublicMembershipForUser({
+                    org: "replicatedhq",
+                    username: "${{ github.event.comment.user.login }}"
+                })
+                if (! membership.status === 204 ) {
+                    core.setFailed("failed to verify repo membership")
+                }
+            } catch (e) {
+                core.setFailed("failed to verify repo membership")
+            }
+      - name: Create SC Issue
+        if: >
+          (
+            contains(github.event.comment.body, '/clubhouse') ||
+            contains(github.event.comment.body, '/shortcut')
+          ) &&  ! (
+            contains(join(github.event.issue.labels.*.name, ' '), 'ch/') ||
+            contains(join(github.event.issue.labels.*.name, ' '), 'sc::')
+          ) && ! contains(join(github.event.issue.labels.*.name, ' '), 'kind::inbound-escalation')
+        id: create-sc
+        uses: docker://dexhorthy/gh-to-zap:1
+        env:
+          COMMENT: ${{ github.event.comment.body }}
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_REPO: ${{ github.event.repository.full_name }}
+          ISSUE_ID: ${{ github.event.issue.id }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GITHUB_LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+  process_slash_commands_from_shortcut:
+    name: Process incoming slash commands from Shortcut
+    runs-on: ubuntu-latest
+    steps:
+      - name: Process Slash Commands
+        uses: actions/github-script@v6
+        if: >
+          (
+            contains(github.event.comment.body, '/tracked') ||
+            contains(github.event.comment.body, '/awaiting-confirmation') ||
+            contains(github.event.comment.body, '/scheduled')
+          ) && (
+            contains(join(github.event.issue.labels.*.name, ' '), 'kind::feature-request') ||
+            contains(join(github.event.issue.labels.*.name, ' '), 'kind::bug')
+          )
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            async function removeStateLabels(context, github, core) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  name: 'enhancements::awaiting-confirmation',
+                })
+              } catch (e) {
+                core.info("Couldn't remove enhancements::awaiting-confirmation")
+                core.info(e)
+              }
+              // try {
+              //   await github.rest.issues.removeLabel({
+              //     owner: context.payload.repository.owner.login,
+              //     repo: context.payload.repository.name,
+              //     issue_number: context.payload.issue.number,
+              //     name: 'enhancements::tracked',
+              //   })
+              // } catch (e) {
+              //   core.info("Couldn't remove enhancements::tracked")
+              // }
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  name: 'enhancements::scheduled',
+                })
+              } catch (e) {
+                core.info("Couldn't remove enhancements::scheduled")
+                core.info(e)
+              }
+            }
+            const PROJECT_NAME = "Enhancements";
+            const NEW_COLUMN = "New";
+            const TRACKED_COLUMN = "Tracked";
+            const SCHEDULED_COLUMN = "Scheduled/In Progress";
+            const AWAITING_CONFIRMATION_COLUMN = "Awaiting Confirmation";
+            const DONE_COLUMN = "Done";
+            core.info(context);
+            console.log(context);
+            core.info("repo check done");
+            const owner = context.payload.repository.owner.login;
+            const repo = context.payload.repository.name;
+            const projects = await github.rest.projects.listForRepo({ owner, repo });
+            // there should always be exactly one
+            const enhancementsProj = projects.data.filter(
+              (p) => p.name.indexOf(PROJECT_NAME) !== -1
+            )[0];
+            if (!enhancementsProj) {
+              core.setFailed("Could not find a project called " + PROJECT_NAME);
+            }
+            core.info("found enhancements project");
+            const columns = await github.rest.projects.listColumns({
+              project_id: enhancementsProj.id,
+            });
+            const columnToCards = async (column) => {
+              return {
+                column,
+                cards: await github.rest.projects.listCards({
+                  column_id: column.id,
+                  per_page: 100
+                }),
+              };
+            };
+            /**
+             * Use the list of columns, fetch all cards for each, then build:
+             *
+             * [
+             *   { name: "New", data: [ {card1}, {card2}]}
+             *   { name: "Open", data: [ {card1}, {card2}]}
+             *   ...
+             * ]
+             */
+            const allCards = await Promise.all(
+              columns.data
+                .map(columnToCards)
+                .map((card) =>
+                  card.then((card2) => ({
+                    name: card2.column.name,
+                    data: card2.cards.data,
+                  }))
+                )
+            );
+            core.info("got top 100 cards from each column");
+            // core.info(JSON.stringify(allCards));
+            /**
+             * now let's transform the above to
+             * [{card1}, {card2}]
+             */
+            const flatCards = allCards.map((c) => c.data).flat();
+            // Assume there is at least one card on the project that matches the issue here
+            const thisCard = flatCards.filter(
+              (c) => c.content_url === context.payload.issue.url
+            )[0];
+            if (!thisCard) {
+              core.setFailed("Could not find a card on the project that matches this issue. Project was " + PROJECT_NAME);
+            }
+            core.info("found matching card for commented issue");
+            const newColumn = columns.data.filter((c) => c.name == NEW_COLUMN)[0];
+            const trackedColumn = columns.data.filter((c) => c.name == TRACKED_COLUMN)[0];
+            const scheduledColumn = columns.data.filter((c) => c.name == SCHEDULED_COLUMN)[0];
+            const awaitingColumn = columns.data.filter((c) => c.name == AWAITING_CONFIRMATION_COLUMN)[0];
+            const doneColumn = columns.data.filter((c) => c.name == DONE_COLUMN)[0];
+            await removeStateLabels(context, github, core);
+            if (context.payload.comment.body.indexOf("/awaiting-confirmation") !== -1) {
+              core.info("moving to Awaiting Confirmation");
+              github.rest.projects.moveCard({
+                card_id: thisCard.id,
+                position: "top",
+                column_id: awaitingColumn.id,
+              });
+              core.info("setting Awaiting Confirmation label");
+              await github.rest.issues.addLabels({
+                owner: context.payload.repository.owner.login,
+                repo: context.payload.repository.name,
+                issue_number: context.payload.issue.number,
+                labels: ['enhancements::awaiting-confirmation'],
+              });
+            } else if (context.payload.comment.body.indexOf("/tracked") !== -1) {
+              core.info("moving to Tracked");
+              github.rest.projects.moveCard({
+                card_id: thisCard.id,
+                position: "top",
+                column_id: trackedColumn.id,
+              });
+              core.info("setting Tracked label");
+              await github.rest.issues.addLabels({
+                owner: context.payload.repository.owner.login,
+                repo: context.payload.repository.name,
+                issue_number: context.payload.issue.number,
+                labels: ['enhancements::tracked'],
+              });
+            } else if (context.payload.comment.body.indexOf("/scheduled") !== -1) {
+              core.info("moving to Scheduled/In Progress");
+              github.rest.projects.moveCard({
+                card_id: thisCard.id,
+                position: "top",
+                column_id: scheduledColumn.id,
+              });
+              core.info("setting Scheduled label");
+              await github.rest.issues.addLabels({
+                owner: context.payload.repository.owner.login,
+                repo: context.payload.repository.name,
+                issue_number: context.payload.issue.number,
+                labels: ['enhancements::scheduled'],
+              });
+            }
+  sling_issue_comments_to_shortcut:
+    name: Sling issue comments to shortcut
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check membership and maybe sling comment
+        uses: actions/github-script@v6
+        if: >
+          (
+            contains(join(github.event.issue.labels.*.name, ' '), 'sc::')
+          ) && (
+            contains(join(github.event.issue.labels.*.name, ' '), 'kind::bug') ||
+            contains(join(github.event.issue.labels.*.name, ' '), 'kind::feature-request') ||
+            contains(join(github.event.issue.labels.*.name, ' '), 'kind::inbound-escalation')
+          ) && (
+            ! contains(github.event.comment.user.login, 'replicated-collab-bot')
+          )
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const slashCommandToAlwaysPublish = `/publish-internal`;
+            const repo = context.payload.repository.name;
+            const comment = context.payload.comment.body;
+            const commentAuthor = context.payload.comment.user.login;
+            const commentUrl = context.payload.comment.html_url;
+            const strippedComment = comment.replace('/publish-internal', '').slice(0, 1000);
+            const scLabel =
+              context.payload.issue.labels.filter(label => label.name.indexOf("sc::") === 0);
+            const shortcutID = scLabel[0].name.split("::")[1];
+            const alwaysPublish =
+              comment.indexOf(slashCommandToAlwaysPublish) !== -1;
+            let membership = {status:0};
+            let userOrVendor = `vendor`;
+            console.log('checking repo membership');
+            try {
+              membership = await github.rest.orgs.checkPublicMembershipForUser({
+                org: "replicatedhq",
+                username: context.payload.comment.user.login,
+              });
+            } catch (e) {
+              core.info(`Member not found status: ${e.status}`);
+            }
+            if (membership.status === 204) {
+              userOrVendor = `replicatedhq user`;
+              if (!alwaysPublish) {
+                core.info(`Commenter is a public member of replicatedhq and comment did not contain ${slashCommandToAlwaysPublish}. NOT slinging comment`);
+                return;
+              }
+            }
+            console.log(`Slinging comment to linked Shortcut story ${shortcutID}`);
+            const shortcutCommentBody = `The linked GitHub issue in ${repo} has [a new comment from the ${userOrVendor} **@${commentAuthor}**](${commentUrl}):
+            * * *
+            ${strippedComment}${strippedComment.length === 1000 ? "..." : ""}
+            `
+            const params = {
+              shortcutID,
+              shortcutCommentBody
+            };
+            console.log(shortcutID, shortcutCommentBody);
+            // can't believe they don't give us a real client :facepalm:
+            const https = require('https');
+            const data = JSON.stringify(params);
+            var post_options = {
+              host: 'hooks.zapier.com',
+              port: '443',
+              path: '/hooks/catch/9310915/be4mspj/',
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(data)
+              }
+            };
+            var post_req = https.request(post_options, function(res) {
+                res.setEncoding('utf8');
+                res.on('data', function (chunk) {
+                    console.log('Response: ' + chunk);
+                });
+            });
+            // post the data
+            post_req.write(data);
+            post_req.end();
+  sling_day0_issue_comments_to_slack:
+    name: Sling Day 0 issue comments to slack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check membership and maybe sling comment
+        uses: actions/github-script@v6
+        if: >
+          (
+            contains(join(github.event.issue.labels.*.name, ' '), 'kind::packaging-step')
+          ) && (
+            ! contains(github.event.comment.user.login, 'replicated-collab-bot')
+          )
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const slashCommandToAlwaysPublish = `/publish-internal`;
+            const repo = context.payload.repository.name;
+            const comment = context.payload.comment.body;
+            const commentAuthor = context.payload.comment.user.login;
+            const commentUrl = context.payload.comment.html_url;
+            const strippedComment = comment.replace('/publish-internal', '');
+            const alwaysPublish =
+              comment.indexOf(slashCommandToAlwaysPublish) !== -1;
+            let membership = {status:0};
+            let userOrVendor = `vendor`;
+            console.log('checking repo membership');
+            try {
+              membership = await github.rest.orgs.checkPublicMembershipForUser({
+                org: "replicatedhq",
+                username: context.payload.comment.user.login,
+              });
+            } catch (e) {
+              core.info(`Member not found status: ${e.status}`);
+            }
+            if (membership.status === 204) {
+              userOrVendor = `replicatedhq user`;
+              if (!alwaysPublish) {
+                core.info(`Commenter is a public member of replicatedhq and comment did not contain ${slashCommandToAlwaysPublish}. NOT slinging comment`);
+                return;
+              }
+            }
+            console.log(`Slinging comment to slack channel`);
+            const quotedComment = '> ' + strippedComment.replace('/n', '/n> ');
+            const commentHeader = `The linked GitHub issue in ${repo} has <a new comment from the ${userOrVendor} @${commentAuthor}|${commentUrl}>`;
+            const commentBody = `${commentHeader}:
+            ${quotedComment}
+            `
+            const params = {
+              commentHeader,
+              commentBody,
+              strippedComment,
+              repo,
+              userOrVendor,
+              commentAuthor,
+              commentUrl,
+              strippedComment,
+              quotedComment
+            };
+            console.log(commentBody);
+            // can't believe they don't give us a real client :facepalm:
+            const https = require('https');
+            const data = JSON.stringify(params);
+            var post_options = {
+              host: 'hooks.zapier.com',
+              port: '443',
+              path: '/hooks/catch/9310915/be7i3gb/',
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(data)
+              }
+            };
+            var post_req = https.request(post_options, function(res) {
+                res.setEncoding('utf8');
+                res.on('data', function (chunk) {
+                    console.log('Response: ' + chunk);
+                });
+            });
+            // post the data
+            post_req.write(data);
+            post_req.end();
