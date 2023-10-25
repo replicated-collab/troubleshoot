@@ -1,0 +1,311 @@
+---
+on:
+  issue_comment:
+    types: [created]
+
+name: Issue Comments
+jobs:
+  process_labels_v2:
+    runs-on: ubuntu-latest
+    name: Slash Command
+    steps:
+      # To use this repository's private action,
+      # you must check out the repository
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Copy Slash Command
+        run: cp -r .github/workflows/slash-command ./
+      - name: Check for Call Command
+        uses: ./slash-command # Uses an action in the root directory
+        id: command
+        with:
+          command: call
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          allowVendor: false
+
+  process_project_cards:
+    name: Apply Slash Commands to Project Cards from Issue Comment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v6
+        if: "contains(github.event.comment.body, '/open') || contains(github.event.comment.body, '/pending') || contains(github.event.comment.body, '/close')"
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const PROJECT_NAME = "Inbound Escalations";
+            const NEW_COLUMN = "New";
+            const OPEN_COLUMN = "Open";
+            const PENDING_COLUMN = "Pending";
+            const CLOSED_COLUMN = "Closed";
+
+            core.info(context);
+            console.log(context);
+            core.info("starting repo check");
+            try {
+              const membership = await github.rest.orgs.checkPublicMembershipForUser({
+                org: "replicatedhq",
+                username: context.payload.comment.user.login,
+              });
+              if (!membership.status === 204) {
+                core.setFailed("failed to verify repo membership");
+              }
+            } catch (e) {
+              core.setFailed("failed to verify repo membership");
+            }
+
+            core.info("repo check done");
+            const owner = context.payload.repository.owner.login;
+            const repo = context.payload.repository.name;
+
+            const projects = await github.rest.projects.listForRepo({ owner, repo });
+            // there should always be exactly one
+            const escalationProj = projects.data.filter(
+              (p) => p.name.indexOf(PROJECT_NAME) !== -1
+            )[0];
+            if (!escalationProj) {
+              core.setFailed("Could not find a project called " + PROJECT_NAME);
+            }
+            core.info("found escalation project");
+            const columns = await github.rest.projects.listColumns({
+              project_id: escalationProj.id,
+            });
+            const columnToCards = async (column) => {
+              return {
+                column,
+                cards: await github.rest.projects.listCards({
+                  column_id: column.id,
+                }),
+              };
+            };
+            /**
+             * Use the list of columns, fetch all cards for each, then build:
+             *
+             * [
+             *   { name: "New", data: [ {card1}, {card2}]}
+             *   { name: "Open", data: [ {card1}, {card2}]}
+             *   ...
+             * ]
+             */
+            const allCards = await Promise.all(
+              columns.data
+                .map(columnToCards)
+                .map((card) =>
+                  card.then((card2) => ({
+                    name: card2.column.name,
+                    data: card2.cards.data,
+                  }))
+                )
+            );
+            core.info("got all cards");
+            /**
+             * now let's transform the above to
+             * [{card1}, {card2}]
+             */
+            const flatCards = allCards.map((c) => c.data).flat();
+            // Assume there is at least one card on the project that matches the issue here
+            const thisCard = flatCards.filter(
+              (c) => c.content_url === context.payload.issue.url
+            )[0];
+            if (!thisCard) {
+              core.info("Could not find a card on the project that matches this issue. Project was " + PROJECT_NAME);
+            }
+            core.info("found matching card for commented issue");
+            const openColumn = columns.data.filter((c) => c.name == NEW_COLUMN)[0];
+            const pendingColumn = columns.data.filter((c) => c.name == PENDING_COLUMN)[0];
+            const closedColumn = columns.data.filter((c) => c.name == CLOSED_COLUMN)[0];
+
+            if (context.payload.comment.body.indexOf("/open") !== -1) {
+              core.info("moving to Open");
+              try {
+                await github.rest.projects.moveCard({
+                  card_id: thisCard.id,
+                  position: "bottom",
+                  column_id: openColumn.id,
+                });
+              } catch (e) {
+                core.info("failed to move card to open column");
+              }
+
+              await github.rest.issues.update({
+                owner, repo,
+                issue_number: context.payload.issue.number,
+                state: "open",
+              });
+            } else if (context.payload.comment.body.indexOf("/close") !== -1) {
+              core.info("moving to Closed");
+              try {
+                await github.rest.projects.moveCard({
+                  card_id: thisCard.id,
+                  position: "bottom",
+                  column_id: closedColumn.id,
+                });
+              } catch (e) {
+                core.info("failed to move card to closed column");
+              };
+
+              await github.rest.issues.update({
+                owner, repo,
+                issue_number: context.payload.issue.number,
+                state: "closed",
+                state_reason: "completed",
+              });
+            } else if (context.payload.comment.body.indexOf("/pending") !== -1) {
+              core.info("moving to Pending");
+              try {
+                await github.rest.projects.moveCard({
+                  card_id: thisCard.id,
+                  position: "bottom",
+                  column_id: pendingColumn.id,
+                });
+              } catch (e) {
+                core.info("failed to move card to pending column");
+              }
+
+              await github.rest.issues.update({
+                owner, repo,
+                issue_number: context.payload.issue.number,
+                state: "open",
+              });
+            }
+  process_labels:
+    name: Apply labels from Slash Commands in Issue Comment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v6
+        if: |
+          contains(github.event.issue.labels.*.name, 'inbound-escalation')
+          && ! contains(github.event.comment.user.login, 'replicated-collab-bot')
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            var membership = {status:0};
+            try {
+              membership = await github.rest.orgs.checkPublicMembershipForUser({
+                org: "replicatedhq",
+                username: context.payload.comment.user.login,
+              });
+            } catch (e) {
+              core.info(`Member not found status: ${e.status}`);
+            }
+            if (membership.status !== 204) {
+              core.info("Commenter is not a public member of replicatedhq, checking issue status");
+              const currentLabels = await github.rest.issues.listLabelsOnIssue({
+                owner: context.payload.repository.owner.login,
+                repo: context.payload.repository.name,
+                issue_number: context.payload.issue.number,
+              });
+              if (currentLabels.data.filter(obj => {return (obj.name === 'status::pending' || obj.name === 'status::closed' || obj.name === 'status::awaiting-confirmation')}).length) {
+                core.info("Setting pending, closed issue or awaiting-confirmation back to open");
+                await removeStatusLabels(context, github, core);
+                await github.rest.issues.addLabels({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  labels: ['status::open'],
+                });
+                if (context.payload.issue.state === "closed") {
+                  try{
+                    await github.rest.issues.update({
+                      owner: context.payload.repository.owner.login,
+                      repo: context.payload.repository.name,
+                      issue_number: context.payload.issue.number,
+                      state: "open",
+                      state_reason: "reopened"
+                    })
+                  }catch (e){
+                    core.info("Could not transition issue state to open")
+                  }
+                }
+              }
+            }
+            else {
+              core.info("Commenter is a public member of replicatedhq processing slash commands")
+              if (context.payload.comment.body.indexOf("/open") !== -1) {
+                core.info("Adding label Open");
+                await removeStatusLabels(context, github, core);
+                await github.rest.issues.addLabels({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  labels: ['status::open'],
+                })
+              } else if (context.payload.comment.body.indexOf("/close") !== -1) {
+                core.info("Adding label Closed");
+                await removeStatusLabels(context, github, core);
+                await github.rest.issues.addLabels({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  labels: ['status::closed'],
+                })
+                /* Add this in once the other script is not processing slash commands
+                await github.rest.issues.update({
+                  owner, repo,
+                  issue_number: context.payload.issue.number,
+                  state: "closed",
+                  state_reason: "completed"
+                });
+                */
+              } else if (context.payload.comment.body.indexOf("/pending") !== -1) {
+                core.info("Adding label Pending");
+                await removeStatusLabels(context, github, core);
+                await github.rest.issues.addLabels({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  labels: ['status::pending'],
+                })
+              } else if (context.payload.comment.body.indexOf("/confirmation") !== -1) {
+                core.info("Adding label awaiting-confirmation");
+                await removeStatusLabels(context, github, core);
+                await github.rest.issues.addLabels({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  labels: ['status::awaiting-confirmation'],
+                })
+              }
+            }
+
+            async function removeStatusLabels() {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  name: 'status::open',
+                })
+              } catch (e) {
+                core.info("Couldn't remove status::open")
+              }
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  name: 'status::pending',
+                })
+              } catch (e) {
+                core.info("Couldn't remove status::pending")
+              }
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  name: 'status::closed',
+                })
+              } catch (e) {
+                core.info("Couldn't remove status::closed")
+              }
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.payload.repository.owner.login,
+                  repo: context.payload.repository.name,
+                  issue_number: context.payload.issue.number,
+                  name: 'status::awaiting-confirmation',
+                })
+              } catch (e) {
+                core.info("Couldn't remove status::awaiting-confirmation")
+              }
+            }
