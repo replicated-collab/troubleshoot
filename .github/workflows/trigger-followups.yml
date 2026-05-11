@@ -1,3 +1,4 @@
+---
 name: Trigger Followups (Case Summary + Relabeler)
 
 on:
@@ -181,5 +182,3 @@ jobs:
               `${partiallySuccessful} partial, ${failedAll} failed ` +
               `(${issues.length} issues total).`
             );
-
-
