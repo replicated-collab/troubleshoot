@@ -1,3 +1,4 @@
+---
 name: Update Status on External Comment
 
 on:
@@ -25,7 +26,7 @@ jobs:
           script: |
             const commenter = context.payload.comment.user.login;
             const isClosed = context.payload.issue.state === 'closed';
-            
+
             // If issue is closed, reopen it first
             if (isClosed) {
               core.info('Commenter is external and issue is closed; reopening issue');
@@ -42,7 +43,7 @@ jobs:
                 return;
               }
             }
-            
+
             // Remove all status::* labels
             let labelsToRemove = [];
             try {
@@ -62,7 +63,7 @@ jobs:
               core.info(`Failed to list labels: ${e.message}`);
               return;
             }
-            
+
             if (labelsToRemove.length === 0) {
               core.info('Issue does not have status:: labels to clear');
             } else {
@@ -81,7 +82,7 @@ jobs:
                 }
               }
             }
-            
+
             // Add status::open label
             try {
               await github.rest.issues.addLabels({
@@ -94,4 +95,3 @@ jobs:
             } catch (e) {
               core.info(`Failed to add status::open label: ${e.message}`);
             }
-
