@@ -1,5 +1,5 @@
 ---
-name: Trigger Followups (Case Summary + Relabeler)
+name: Trigger Followups (Case Summary)
 
 on:
   issues:
@@ -16,7 +16,7 @@ jobs:
     name: Dispatch followups in ce-automation
     runs-on: ubuntu-latest
     steps:
-      - name: Prepare inbound escalation issues (with product labels)
+      - name: Prepare inbound escalation issues
         id: prepare
         uses: actions/github-script@v8
         env:
@@ -25,7 +25,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const rawIssueNumbers = String(process.env.RAW_ISSUE_NUMBERS || '').trim();
-            const includeProductLabels = true;
 
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -69,16 +68,10 @@ jobs:
                 continue;
               }
 
-              const entry = {
+              issues.push({
                 issue_number,
                 issue_url: data.html_url
-              };
-
-              if (includeProductLabels) {
-                entry.product_labels = labels.filter((n) => n.startsWith('product::'));
-              }
-
-              issues.push(entry);
+              });
             }
 
             core.setOutput('issues_json', JSON.stringify(issues));
@@ -106,10 +99,9 @@ jobs:
 
             let anyDispatch = false;
             let fullySuccessful = 0;
-            let partiallySuccessful = 0;
             let failedAll = 0;
 
-            for (const { issue_number, issue_url, product_labels } of issues) {
+            for (const { issue_number, issue_url } of issues) {
               const baseInputs = {
                 issue_url,
                 issue_number: String(issue_number),
@@ -118,9 +110,7 @@ jobs:
               };
 
               let caseSummaryOk = false;
-              let relabelerOk = false;
               try {
-                // 1) Case summary
                 await github.rest.actions.createWorkflowDispatch({
                   owner: targetOwner,
                   repo: targetRepo,
@@ -135,38 +125,8 @@ jobs:
                 console.log(`Case summary dispatch failed for #${issue_number} (${message}${status})`);
               }
 
-              try {
-                // 2) Relabeler (needs current_labels)
-                await github.rest.actions.createWorkflowDispatch({
-                  owner: targetOwner,
-                  repo: targetRepo,
-                  workflow_id: 'issue-relabeler-on-close.yml',
-                  ref: 'main',
-                  inputs: {
-                    ...baseInputs,
-                    current_labels: JSON.stringify(product_labels || [])
-                  }
-                });
-                relabelerOk = true;
-              } catch (error) {
-                const message = error?.message || 'unknown error';
-                const status = error?.status ? ` status=${error.status}` : '';
-                console.log(`Relabeler dispatch failed for #${issue_number} (${message}${status})`);
-              }
-
-              const summaryStatus = caseSummaryOk && relabelerOk
-                ? 'case-summary+relabeler'
-                : caseSummaryOk
-                  ? 'case-summary-only'
-                  : relabelerOk
-                    ? 'relabeler-only'
-                    : 'none';
-              console.log(`Dispatched followups for #${issue_number} (${summaryStatus})`);
-              if (summaryStatus === 'case-summary+relabeler') {
+              if (caseSummaryOk) {
                 fullySuccessful += 1;
-                anyDispatch = true;
-              } else if (summaryStatus === 'case-summary-only' || summaryStatus === 'relabeler-only') {
-                partiallySuccessful += 1;
                 anyDispatch = true;
               } else {
                 failedAll += 1;
@@ -178,7 +138,6 @@ jobs:
               return;
             }
             console.log(
-              `Dispatch results: ${fullySuccessful} fully, ` +
-              `${partiallySuccessful} partial, ${failedAll} failed ` +
+              `Dispatch results: ${fullySuccessful} successful, ${failedAll} failed ` +
               `(${issues.length} issues total).`
             );
