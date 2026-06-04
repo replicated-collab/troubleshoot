@@ -18,13 +18,14 @@ jobs:
           operations-per-run: 150
           days-before-stale: 4
           days-before-close: 2
-          stale-issue-message: "We noticed you haven’t updated us in a few days. In order to troubleshoot this issue further, we need some additional information. Please review the last request and let us know if you need assistance collecting the requested data. In order to help ensure we can address ongoing issues effectively, we will archive this issue if we don’t hear from you in the next 2 days."
-          close-issue-message: "We haven’t heard back and are optimistic that indicates this issue is resolved. As such, we will close this case today to increase visibility of active issues. If you are still experiencing this issue, please let us know by commenting with the additional information requested above and pressing the re-open button. If you experience a similar issue or see this reoccur, please open a new support case and reference this one for historical data."
+          stale-issue-message: "We noticed you haven't updated us in a few days. In order to troubleshoot this issue further, we need some additional information. Please review the last request and let us know if you need assistance collecting the requested data. In order to help ensure we can address ongoing issues effectively, we will archive this issue if we don't hear from you in the next 2 days."
+          close-issue-message: "We haven't heard back for some time, so we are updating this case to keep our active support queue visible and manageable. If you are still experiencing this issue, please comment with the additional information requested above. If you experience a similar issue or see this reoccur, please open a new support case and reference this one for historical data."
           stale-issue-label: "status::inactive"
           close-issue-label: "status::closed"
           close-issue-reason: "completed"
           any-of-labels: "status::pending,status::inactive,status::stale"
           only-labels: "kind::inbound-escalation"
+          exempt-issue-labels: "kind::bug,kind::feature-request"
           debug-only: false
 
       - name: Extract closed issue numbers (stale)
@@ -34,8 +35,6 @@ jobs:
           CLOSED_ISSUES_PRS_JSON: ${{ steps.stale.outputs.closed-issues-prs }}
         with:
           script: |
-            // actions/stale outputs JSON that contains repoToken, so GitHub may block it as a job output.
-            // Extract only issue numbers here and pass ONLY the number list to downstream jobs.
             const raw = String(process.env.CLOSED_ISSUES_PRS_JSON || '').trim();
             if (!raw) {
               core.setOutput('issue_numbers', '');
@@ -47,11 +46,8 @@ jobs:
               throw new Error('closed-issues-prs JSON is not an array');
             }
 
-            const nums = arr
-              .map((x) => x?.number)
-              .filter((n) => Number.isInteger(n) && n > 0);
-
-            core.setOutput('issue_numbers', nums.join(','));
+            const numbers = arr.map(i => i.number).join(',');
+            core.setOutput('issue_numbers', numbers);
 
   confirmation:
     runs-on: ubuntu-latest
@@ -65,12 +61,13 @@ jobs:
           operations-per-run: 150
           days-before-stale: 2
           days-before-close: 0
-          close-issue-message: "We haven’t heard back and are optimistic that indicates this issue is resolved. As such, we will close this case today to increase visibility of active issues. If you are still experiencing this issue, please let us know by commenting with the additional information requested above and pressing the re-open button. If you experience a similar issue or see this reoccur, please open a new support case and reference this one for historical data."
+          close-issue-message: "We haven't heard back since we confirmed a solution was delivered. We will update this case to keep our active queue visible. If you are still experiencing this issue, please comment with the additional information requested above. If you experience a similar issue, please open a new support case and reference this one for historical data."
           stale-issue-label: "status::inactive"
           close-issue-label: "status::closed"
           close-issue-reason: "completed"
           any-of-labels: "status::awaiting-confirmation"
           only-labels: "kind::inbound-escalation"
+          exempt-issue-labels: "kind::bug,kind::feature-request"
           debug-only: false
 
       - name: Extract closed issue numbers (confirmation)
@@ -80,8 +77,6 @@ jobs:
           CLOSED_ISSUES_PRS_JSON: ${{ steps.stale.outputs.closed-issues-prs }}
         with:
           script: |
-            // actions/stale outputs JSON that contains repoToken, so GitHub may block it as a job output.
-            // Extract only issue numbers here and pass ONLY the number list to downstream jobs.
             const raw = String(process.env.CLOSED_ISSUES_PRS_JSON || '').trim();
             if (!raw) {
               core.setOutput('issue_numbers', '');
@@ -93,24 +88,91 @@ jobs:
               throw new Error('closed-issues-prs JSON is not an array');
             }
 
-            const nums = arr
-              .map((x) => x?.number)
-              .filter((n) => Number.isInteger(n) && n > 0);
+            const numbers = arr.map(i => i.number).join(',');
+            core.setOutput('issue_numbers', numbers);
 
-            core.setOutput('issue_numbers', nums.join(','));
+  stale-hybrid-awaiting-confirmation:
+    runs-on: ubuntu-latest
+    outputs:
+      issue_numbers: ${{ steps.extract.outputs.issue_numbers }}
+    steps:
+      - id: stale
+        uses: actions/stale@v10
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          operations-per-run: 150
+          days-before-stale: 2
+          days-before-close: 0
+          stale-issue-message: "This enhancement (or a workaround/alternative solution) has been delivered by our team and we are waiting for your feedback. We will archive this enhancement tracking issue as accepted if we don't hear from you in 2 days."
+          close-issue-message: "We haven't heard back for some time, so we are updating this case to keep our active support queue visible and manageable. If you are still experiencing this issue, please comment with the additional information requested above. If you experience a similar issue or see this reoccur, please open a new support case and reference this one for historical data."
+          stale-issue-label: "status::inactive"
+          close-issue-label: "status::closed"
+          close-issue-reason: "completed"
+          only-labels: "kind::inbound-escalation,enhancements::awaiting-confirmation,status::awaiting-confirmation"
+          any-of-labels: "kind::bug,kind::feature-request"
+          debug-only: false
+      - name: Extract closed issue numbers
+        id: extract
+        uses: actions/github-script@v8
+        env:
+          CLOSED_ISSUES_PRS_JSON: ${{ steps.stale.outputs.closed-issues-prs }}
+        with:
+          script: |
+            const raw = String(process.env.CLOSED_ISSUES_PRS_JSON || '').trim();
+            if (!raw) { core.setOutput('issue_numbers', ''); return; }
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) throw new Error('closed-issues-prs JSON is not an array');
+            core.setOutput('issue_numbers', arr.map(i => i.number).join(','));
+
+  stale-hybrid-pending:
+    runs-on: ubuntu-latest
+    outputs:
+      issue_numbers: ${{ steps.extract.outputs.issue_numbers }}
+    steps:
+      - id: stale
+        uses: actions/stale@v10
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          operations-per-run: 150
+          days-before-stale: 4
+          days-before-close: 2
+          stale-issue-message: "We noticed you haven't updated us in a few days. In order to troubleshoot this issue further, we need some additional information. Please review the last request and let us know if you need assistance collecting the requested data. In order to help ensure we can address ongoing issues effectively, we will archive this issue if we don't hear from you in the next 2 days."
+          close-issue-message: "We haven't heard back on this tracked bug/feature request. We're updating this case to keep our active queue visible. If you're still experiencing this issue, please comment and we can reopen."
+          stale-issue-label: "status::inactive"
+          close-issue-label: "status::closed"
+          close-issue-reason: "completed"
+          only-labels: "kind::inbound-escalation,enhancements::awaiting-confirmation,status::pending"
+          any-of-labels: "kind::bug,kind::feature-request"
+          debug-only: false
+      - name: Extract closed issue numbers
+        id: extract
+        uses: actions/github-script@v8
+        env:
+          CLOSED_ISSUES_PRS_JSON: ${{ steps.stale.outputs.closed-issues-prs }}
+        with:
+          script: |
+            const raw = String(process.env.CLOSED_ISSUES_PRS_JSON || '').trim();
+            if (!raw) { core.setOutput('issue_numbers', ''); return; }
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) throw new Error('closed-issues-prs JSON is not an array');
+            core.setOutput('issue_numbers', arr.map(i => i.number).join(','));
 
   dispatch-followups:
     runs-on: ubuntu-latest
     needs:
       - stale
       - confirmation
-    if: always() && (needs.stale.outputs.issue_numbers != '' || needs.confirmation.outputs.issue_numbers != '')
+      - stale-hybrid-awaiting-confirmation
+      - stale-hybrid-pending
+    if: always() && (needs.stale.outputs.issue_numbers != '' || needs.confirmation.outputs.issue_numbers != '' || needs.stale-hybrid-awaiting-confirmation.outputs.issue_numbers != '' || needs.stale-hybrid-pending.outputs.issue_numbers != '')
     steps:
       - name: Dispatch follow-up workflows for closed issues (combined)
         uses: actions/github-script@v8
         env:
           STALE_ISSUE_NUMBERS: ${{ needs.stale.outputs.issue_numbers }}
           CONFIRM_ISSUE_NUMBERS: ${{ needs.confirmation.outputs.issue_numbers }}
+          HYBRID_AWAIT_ISSUE_NUMBERS: ${{ needs.stale-hybrid-awaiting-confirmation.outputs.issue_numbers }}
+          HYBRID_PENDING_ISSUE_NUMBERS: ${{ needs.stale-hybrid-pending.outputs.issue_numbers }}
           DISPATCH_REF: ${{ github.ref }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -128,7 +190,9 @@ jobs:
 
             const staleNums = parseIssueNumbersCsv(process.env.STALE_ISSUE_NUMBERS);
             const confirmNums = parseIssueNumbersCsv(process.env.CONFIRM_ISSUE_NUMBERS);
-            const combined = Array.from(new Set([...staleNums, ...confirmNums]));
+            const hybridAwaitNums = parseIssueNumbersCsv(process.env.HYBRID_AWAIT_ISSUE_NUMBERS);
+            const hybridPendingNums = parseIssueNumbersCsv(process.env.HYBRID_PENDING_ISSUE_NUMBERS);
+            const combined = Array.from(new Set([...staleNums, ...confirmNums, ...hybridAwaitNums, ...hybridPendingNums]));
             if (combined.length === 0) {
               console.log('No issue numbers found across stale+confirmation; nothing to dispatch.');
               return;
@@ -171,11 +235,12 @@ jobs:
           operations-per-run: 150
           days-before-stale: 0
           days-before-close: 2
-          stale-issue-message: "This enhancement (or a workaround/alternative solution) has been delivered by our team and we are waiting for your feedback. We will archive this enhancement tracking issue as accepted if we don’t hear from you in 2 days."
-          close-issue-message: "We haven’t heard back and are optimistic that indicates a solution has been delivered and is working as expected. As such, we will close this case today to increase visibility of active issues. If you are unable to validate this enhancement, please let us know by commenting and pressing the re-open button."
+          stale-issue-message: "This enhancement (or a workaround/alternative solution) has been delivered by our team and we are waiting for your feedback. We will archive this enhancement tracking issue as accepted if we don't hear from you in 2 days."
+          close-issue-message: "We haven't heard back and are optimistic that indicates a solution has been delivered and is working as expected. As such, we will close this case today to increase visibility of active issues. If you are unable to validate this enhancement, please let us know by commenting and pressing the re-open button."
           stale-issue-label: "enhancements::inactive"
           close-issue-label: "enhancements::done"
           close-issue-reason: "completed"
           any-of-labels: "kind::feature-request,kind::bug"
           only-labels: "enhancements::awaiting-confirmation"
+          exempt-issue-labels: "kind::inbound-escalation"
           debug-only: false
