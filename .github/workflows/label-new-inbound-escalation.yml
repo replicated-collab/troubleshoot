@@ -1,0 +1,50 @@
+---
+name: Label New Inbound Escalation
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  label-and-comment:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    if: github.event.issue.pull_request == null
+    steps:
+      - name: Label unclassified issue and comment
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const labels = context.payload.issue.labels || [];
+            const hasKindLabel = labels.some((label) =>
+              typeof label === 'string'
+                ? label.startsWith('kind::')
+                : label.name.startsWith('kind::')
+            );
+
+            if (hasKindLabel) {
+              core.info('Issue already has a kind:: label; nothing to do.');
+              return;
+            }
+
+            const issueNumber = context.payload.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              labels: ['kind::inbound-escalation']
+            });
+            core.info('Added kind::inbound-escalation label.');
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              body: 'Thank you for opening this issue. This issue has been labeled as a support escalation. The supported process for raising support issues and feature requests is via the Vendor Portal at https://vendor.replicated.com/support.'
+            });
+            core.info('Posted vendor portal comment.');
